@@ -137,7 +137,7 @@ class PowercalcCommonFlow(ABC, ConfigEntryBaseFlow):
         self.is_options_flow: bool = isinstance(self, OptionsFlow)
         self.strategy: CalculationStrategy | None = None
         self.name: str | None = None
-        self.handled_steps: list[Step] = []
+        self.handled_steps: set[Step] = set()
 
         # Initialize flow handlers
         flow_key = "options" if self.is_options_flow else "config"
@@ -240,7 +240,7 @@ class PowercalcCommonFlow(ABC, ConfigEntryBaseFlow):
                 self.name = user_input[CONF_NAME]
             self.sensor_config.update(user_input)
 
-            self.handled_steps.append(form_step.step)
+            self.handled_steps.add(form_step.step)
             next_step = form_step.next_step
             if callable(form_step.next_step):
                 next_step = await form_step.next_step(user_input)

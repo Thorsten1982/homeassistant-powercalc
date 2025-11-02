@@ -25,7 +25,7 @@ from custom_components.powercalc.const import (
     CalculationStrategy,
 )
 from custom_components.powercalc.discovery import get_power_profile_by_source_entity
-from custom_components.powercalc.flow_helper.common import FlowType, PowercalcFormStep, Step
+from custom_components.powercalc.flow_helper.common import PowercalcFormStep, Step
 from custom_components.powercalc.flow_helper.dynamic_field_builder import build_dynamic_field_schema
 from custom_components.powercalc.flow_helper.schema import SCHEMA_ENERGY_SENSOR_TOGGLE, SCHEMA_UTILITY_METER_TOGGLE, build_sub_profile_schema
 from custom_components.powercalc.power_profile.library import ModelInfo, ProfileLibrary
@@ -147,41 +147,43 @@ class LibraryFlow:
         self,
         user_input: dict[str, Any] | None = None,
     ) -> FlowResult:
-        """
-        Handles the logic after the user either selected manufacturer/model himself or confirmed autodiscovered.
-        Forwards to the next step in the flow.
-        """
-        if not self.flow.selected_profile:
-            return self.flow.async_abort(reason="model_not_supported")  # type:ignore # pragma: no cover
+        """Advance the flow after a library profile is chosen/confirmed."""
+        flow = self.flow
+        profile = flow.selected_profile
+        handled = flow.handled_steps
 
-        if Step.LIBRARY_CUSTOM_FIELDS not in self.flow.handled_steps and self.flow.selected_profile.has_custom_fields:
+        if profile is None:
+            return flow.async_abort(reason="model_not_supported")
+
+        # 1) Custom fields (library)
+        if Step.LIBRARY_CUSTOM_FIELDS not in handled and profile.has_custom_fields:
             return await self.async_step_library_custom_fields()
 
-        if Step.AVAILABILITY_ENTITY not in self.flow.handled_steps and self.flow.selected_profile.discovery_by == DiscoveryBy.DEVICE:
-            result = await self.async_step_availability_entity()
-            if result:
-                return result
+        # 2) Availability entity (only for device discovery)
+        if Step.AVAILABILITY_ENTITY not in handled and profile.discovery_by == DiscoveryBy.DEVICE:
+            res = await self.async_step_availability_entity()
+            if res:
+                return res
 
-        if Step.SUB_PROFILE not in self.flow.handled_steps and await self.flow.selected_profile.requires_manual_sub_profile_selection:
+        # 3) Manual sub-profile selection (only if required)
+        if Step.SUB_PROFILE not in handled and await profile.requires_manual_sub_profile_selection:
             return await self.async_step_sub_profile()
 
-        if (
-            Step.SMART_SWITCH not in self.flow.handled_steps
-            and self.flow.selected_profile.device_type == DeviceType.SMART_SWITCH
-            and self.flow.selected_profile.calculation_strategy == CalculationStrategy.FIXED
+        # 4) Remaining strategy-specific config steps (first match wins)
+        for step, condition in (
+            (
+                Step.SMART_SWITCH,
+                profile.device_type == DeviceType.SMART_SWITCH and profile.calculation_strategy == CalculationStrategy.FIXED,
+            ),
+            (Step.FIXED, profile.needs_fixed_config),
+            (Step.LINEAR, profile.needs_linear_config),
+            (Step.MULTI_SWITCH, profile.calculation_strategy == CalculationStrategy.MULTI_SWITCH),
         ):
-            return await self.async_step_smart_switch()
+            if step not in handled and condition:
+                return await flow.async_step(step)
 
-        if Step.FIXED not in self.flow.handled_steps and self.flow.selected_profile.needs_fixed_config:  # pragma: no cover
-            return await self.flow.flow_handlers[FlowType.VIRTUAL_POWER].async_step_fixed()  # type:ignore
-
-        if Step.LINEAR not in self.flow.handled_steps and self.flow.selected_profile.needs_linear_config:
-            return await self.flow.flow_handlers[FlowType.VIRTUAL_POWER].async_step_linear()  # type:ignore
-
-        if Step.MULTI_SWITCH not in self.flow.handled_steps and self.flow.selected_profile.calculation_strategy == CalculationStrategy.MULTI_SWITCH:
-            return await self.flow.flow_handlers[FlowType.VIRTUAL_POWER].async_step_multi_switch()  # type:ignore
-
-        return await self.flow.flow_handlers[FlowType.GROUP].async_step_assign_groups()  # type:ignore
+        # 5) Default: assign to groups
+        return await flow.async_step(Step.ASSIGN_GROUPS)
 
     async def async_step_library_custom_fields(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Handle the flow for custom fields."""
@@ -272,7 +274,7 @@ class LibraryFlow:
             first_entity = entity_selector.config["include_entities"][0]
         except IndexError:
             # Skip step if no entities are available
-            self.flow.handled_steps.append(Step.AVAILABILITY_ENTITY)
+            self.flow.handled_steps.add(Step.AVAILABILITY_ENTITY)
             return None
         return await self.flow.handle_form_step(
             PowercalcFormStep(
